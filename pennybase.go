@@ -5,12 +5,17 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"log"
+	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -397,6 +402,234 @@ func (s *Store) List(resource, sortBy string) ([]Resource, error) {
 		})
 	}
 	return res, nil
+}
+
+func (s *Store) Close() error {
+	for _, db := range s.Resources {
+		if err := db.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) Authenticate(username, password string) (Resource, error) {
+	users, err := s.List("_users", "")
+	if err != nil {
+		return nil, fmt.Errorf("users error: %w", err)
+	}
+	for _, u := range users {
+		if u["_id"] == username && u["password"] == HashPasswd(password, u["salt"].(string)) {
+			return u, nil
+		}
+	}
+	return nil, errors.New("unauthenticated")
+}
+
+func (s *Store) Authorize(resource, id, action, username, password string) error {
+	permissions, err := s.List("_permissions", "")
+	if err != nil {
+		return fmt.Errorf("permissions error: %w", err)
+	}
+	var u Resource
+	for _, p := range permissions {
+		if p["resource"] != resource || (p["action"] != "*" && p["action"] != action) {
+			continue
+		}
+		if p["field"] == "" && p["role"] == "" { // public
+			return nil
+		}
+		// Non-public, requires authentication
+		if u == nil {
+			u, err = s.Authenticate(username, password)
+			if err != nil {
+				return err
+			}
+		}
+		// Any role? Or user has the role?
+		if p["role"] == "*" || slices.Contains(u["roles"].([]string), p["role"].(string)) {
+			return nil
+		}
+		if id != "" {
+			res, err := s.Get(resource, id)
+			if err != nil {
+				return err
+			}
+			if user, ok := res[p["field"].(string)]; ok && user == username {
+				return nil // user name matches requested resource field (string)
+			} else if users, ok := res[p["field"].(string)].([]string); ok && slices.Contains(users, username) {
+				return nil // user name is in the requested resource field (list)
+			}
+		}
+	}
+	return errors.New("unauthorized 2")
+}
+
+type Broker struct {
+	subs map[string]map[chan string]bool // userID -> channels
+	mu   sync.RWMutex
+}
+
+func (b *Broker) Subscribe(user string, ch chan string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.subs[user] == nil {
+		b.subs[user] = map[chan string]bool{}
+	}
+	b.subs[user][ch] = true
+}
+func (b *Broker) Unsubscribe(user string, ch chan string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.subs[user] != nil {
+		delete(b.subs[user], ch)
+	}
+}
+func (b *Broker) Notify(resource string, users []string) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for _, uid := range users {
+		for ch := range b.subs[uid] {
+			select {
+			case ch <- resource:
+			default:
+			}
+		}
+	}
+}
+
+type Server struct {
+	store  *Store
+	broker *Broker
+	mux    *http.ServeMux
+}
+
+func NewServer(dataDir, tmplDir, staticDir string) (*Server, error) {
+	store, err := NewStore(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{store: store, broker: &Broker{subs: map[string]map[chan string]bool{}}, mux: http.NewServeMux()}
+	s.mux.HandleFunc("GET /api/{resource}/", s.handleList)
+	s.mux.HandleFunc("POST /api/{resource}/", s.handleCreate)
+	s.mux.HandleFunc("GET /api/{resource}/{id}", s.handleGet)
+	s.mux.HandleFunc("PUT /api/{resource}/{id}", s.handleUpdate)
+	s.mux.HandleFunc("DELETE /api/{resource}/{id}", s.handleDelete)
+	if tmplDir != "" {
+		if tmpl, err := template.ParseGlob(filepath.Join(tmplDir, "*")); err == nil {
+			for _, t := range tmpl.Templates() {
+				s.mux.Handle(fmt.Sprintf("GET /%s", t.Name()), s.handleTemplate(tmpl, t.Name()))
+			}
+		}
+	}
+	if staticDir != "" {
+		s.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
+	}
+
+	return s, nil
+}
+
+func (s *Server) Handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mux.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
+	res, err := s.store.List(r.PathValue("resource"), "")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(res)
+}
+
+func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
+	var res Resource
+	if err := json.NewDecoder(r.Body).Decode(&res); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	resource := r.PathValue("resource")
+	id, err := s.store.Create(resource, res)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Location", fmt.Sprintf("/api/%s/%s", resource, id))
+	w.Header().Set("HX-Trigger", fmt.Sprintf("%s-changed", resource))
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
+	res, err := s.store.Get(r.PathValue("resource"), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if res == nil {
+		http.NotFound(w, r)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(res)
+}
+
+func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	res := Resource{}
+	if err := json.NewDecoder(r.Body).Decode(&res); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	resource := r.PathValue("resource")
+	res["_id"] = r.PathValue("id")
+	if err := s.store.Update(resource, res); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("HX-Trigger", fmt.Sprintf("%s-changed", resource))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.Delete(r.PathValue("resource"), r.PathValue("id")); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *Server) handleTemplate(tmpl *template.Template, name string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		data := map[string]any{"Store": s.store, "Request": r, "_id": r.URL.Query().Get("_id")}
+		tmpl.ExecuteTemplate(w, name, data)
+	}
+}
+
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE not supported", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	ch := make(chan string)
+	username, password, _ := r.BasicAuth()
+	if _, err := s.store.Authenticate(username, password); err != nil {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	s.broker.Subscribe(username, ch)
+	defer s.broker.Unsubscribe(username, ch)
+	for {
+		select {
+		case resource := <-ch:
+			fmt.Fprintf(w, "event: update\ndata: %s\n\n", resource)
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 func main() {}

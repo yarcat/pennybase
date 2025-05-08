@@ -1,0 +1,16 @@
+s1,1,_users,_id,text,,,^.+$
+s2,1,_users,_v,number,1,,
+s4,1,_users,salt,text,,,
+s5,1,_users,password,text,,,^.+$
+s6,1,_users,roles,list,,,
+s7,1,_permissions,_id,text,,,^.+$
+s8,1,_permissions,_v,number,1,,
+s9,1,_permissions,resource,text,,,^.+$
+s10,1,_permissions,action,text,,,^.+$
+s11,1,_permissions,field,text,,,^.*$
+s12,1,_permissions,role,text,,,^.*$
+s13,1,books,_id,text,,,^.+$
+s14,1,books,_v,number,1,,
+s15,1,books,title,text,,,^.+$
+s16,1,books,owner,text,,,^.+$
+s17,1,books,coowners,list,,,

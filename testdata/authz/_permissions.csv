@@ -1,0 +1,5 @@
+p1,1,books,read,,,"Public access with no authentication",
+p2,1,books,create,,editor,"Editor role can create books",
+p3,1,books,update,owner,,"Owner can update their own books",
+p4,1,books,delete,,admin,"Admin role can delete any book",
+p5,1,books,*,coowners,,"Co-owners of a book can perform any action on it",

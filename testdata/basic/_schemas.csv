@@ -1,0 +1,7 @@
+s1,1,books,_id,text,,,^.+$
+s2,1,books,_v,number,1,,
+s3,1,books,title,text,,,^.+$
+s4,1,books,author,text,,,^.+$
+s5,1,books,publication_year,number,0,3000,
+s6,1,books,genres,list,,,
+s7,1,books,isbn,text,,,^\d{3}-\d{10}$

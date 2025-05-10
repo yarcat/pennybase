@@ -462,7 +462,7 @@ func (s *Store) Authorize(resource, id, action, username, password string) error
 			}
 		}
 	}
-	return errors.New("unauthorized 2")
+	return errors.New("unauthorized")
 }
 
 type Broker struct {
@@ -510,11 +510,25 @@ func NewServer(dataDir, tmplDir, staticDir string) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{store: store, broker: &Broker{subs: map[string]map[chan string]bool{}}, mux: http.NewServeMux()}
-	s.mux.HandleFunc("GET /api/{resource}/", s.handleList)
-	s.mux.HandleFunc("POST /api/{resource}/", s.handleCreate)
-	s.mux.HandleFunc("GET /api/{resource}/{id}", s.handleGet)
-	s.mux.HandleFunc("PUT /api/{resource}/{id}", s.handleUpdate)
-	s.mux.HandleFunc("DELETE /api/{resource}/{id}", s.handleDelete)
+	auth := func(next http.HandlerFunc) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			resource := r.PathValue("resource")
+			action := map[string]string{"GET": "read", "POST": "create", "PUT": "update", "DELETE": "delete"}[r.Method]
+			if resource != "" && action != "" {
+				username, password, _ := r.BasicAuth()
+				if err := s.store.Authorize(resource, r.PathValue("id"), action, username, password); err != nil {
+					http.Error(w, err.Error(), http.StatusUnauthorized)
+					return
+				}
+			}
+			next(w, r)
+		})
+	}
+	s.mux.Handle("GET /api/{resource}/", auth(s.handleList))
+	s.mux.Handle("POST /api/{resource}/", auth(s.handleCreate))
+	s.mux.Handle("GET /api/{resource}/{id}", auth(s.handleGet))
+	s.mux.Handle("PUT /api/{resource}/{id}", auth(s.handleUpdate))
+	s.mux.Handle("DELETE /api/{resource}/{id}", auth(s.handleDelete))
 	if tmplDir != "" {
 		if tmpl, err := template.ParseGlob(filepath.Join(tmplDir, "*")); err == nil {
 			for _, t := range tmpl.Templates() {
@@ -529,11 +543,7 @@ func NewServer(dataDir, tmplDir, staticDir string) (*Server, error) {
 	return s, nil
 }
 
-func (s *Server) Handler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.mux.ServeHTTP(w, r)
-	})
-}
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	res, err := s.store.List(r.PathValue("resource"), "")

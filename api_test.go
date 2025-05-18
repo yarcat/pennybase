@@ -21,7 +21,7 @@ func TestServerREST(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.store.Close()
+	defer s.Store.Close()
 
 	ts := httptest.NewServer(s)
 	defer ts.Close()

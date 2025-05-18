@@ -265,14 +265,19 @@ func (db *csvDB) Iter() func(yield func(Record, error) bool) {
 	}
 }
 
+type Hook func(trigger, resource, id, user string, r Resource) error
+
+func nopHook(trigger, resource, id, user string, r Resource) error { return nil }
+
 type Store struct {
 	Dir       string
 	Schemas   map[string]Schema
 	Resources map[string]DB
+	Hook      Hook
 }
 
 func NewStore(dir string) (*Store, error) {
-	s := &Store{Dir: dir, Schemas: map[string]Schema{}, Resources: map[string]DB{}}
+	s := &Store{Dir: dir, Schemas: map[string]Schema{}, Resources: map[string]DB{}, Hook: nopHook}
 	schemaDB, err := NewCSVDB(s.Dir + "/_schemas.csv")
 	if err != nil {
 		return nil, err
@@ -312,11 +317,17 @@ func (s *Store) Create(resource string, r Resource) (string, error) {
 	newID := ID()
 	r["_id"] = newID
 	r["_v"] = 1.0
+	if err := s.Hook("create", resource, newID, "", r); err != nil {
+		return "", err
+	}
 	rec, err := s.Schemas[resource].Record(r)
 	if err != nil {
 		return "", err
 	}
-	return newID, db.Create(rec)
+	if err := db.Create(rec); err != nil {
+		return "", err
+	}
+	return newID, nil
 }
 
 func (s *Store) Update(resource string, r Resource) error {
@@ -334,6 +345,9 @@ func (s *Store) Update(resource string, r Resource) error {
 		}
 	}
 	r["_v"] = orig["_v"].(float64) + 1
+	if err := s.Hook("update", resource, r["_id"].(string), "", r); err != nil {
+		return err
+	}
 	rec, err := s.Schemas[resource].Record(r)
 	if err != nil {
 		return err
@@ -345,6 +359,9 @@ func (s *Store) Delete(resource, id string) error {
 	db, ok := s.Resources[resource]
 	if !ok {
 		return fmt.Errorf("resource %s not found", resource)
+	}
+	if err := s.Hook("delete", resource, id, "", nil); err != nil {
+		return err
 	}
 	return db.Delete(id)
 }
@@ -465,33 +482,41 @@ func (s *Store) Authorize(resource, id, action, username, password string) error
 	return errors.New("unauthorized")
 }
 
-type Broker struct {
-	subs map[string]map[chan string]bool // userID -> channels
-	mu   sync.RWMutex
+type Event struct {
+	Action string   `json:"action"`
+	ID     string   `json:"id"`
+	Data   Resource `json:"data"`
 }
 
-func (b *Broker) Subscribe(user string, ch chan string) {
+type Broker struct {
+	channels map[string]map[chan Event]bool // resource -> channels
+	mu       sync.RWMutex
+}
+
+func (b *Broker) Subscribe(resource string, ch chan Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.subs[user] == nil {
-		b.subs[user] = map[chan string]bool{}
+	if b.channels[resource] == nil {
+		b.channels[resource] = make(map[chan Event]bool)
 	}
-	b.subs[user][ch] = true
+	b.channels[resource][ch] = true
 }
-func (b *Broker) Unsubscribe(user string, ch chan string) {
+
+func (b *Broker) Unsubscribe(resource string, ch chan Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.subs[user] != nil {
-		delete(b.subs[user], ch)
+	if subs := b.channels[resource]; subs != nil {
+		delete(subs, ch)
 	}
 }
-func (b *Broker) Notify(resource string, users []string) {
+
+func (b *Broker) Publish(resource string, evt Event) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	for _, uid := range users {
-		for ch := range b.subs[uid] {
+	if subs := b.channels[resource]; subs != nil {
+		for ch := range subs {
 			select {
-			case ch <- resource:
+			case ch <- evt:
 			default:
 			}
 		}
@@ -499,9 +524,9 @@ func (b *Broker) Notify(resource string, users []string) {
 }
 
 type Server struct {
-	store  *Store
-	broker *Broker
-	mux    *http.ServeMux
+	Store  *Store
+	Broker *Broker
+	Mux    *http.ServeMux
 }
 
 func NewServer(dataDir, tmplDir, staticDir string) (*Server, error) {
@@ -509,14 +534,14 @@ func NewServer(dataDir, tmplDir, staticDir string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{store: store, broker: &Broker{subs: map[string]map[chan string]bool{}}, mux: http.NewServeMux()}
+	s := &Server{Store: store, Broker: &Broker{channels: map[string]map[chan Event]bool{}}, Mux: http.NewServeMux()}
 	auth := func(next http.HandlerFunc) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			resource := r.PathValue("resource")
 			action := map[string]string{"GET": "read", "POST": "create", "PUT": "update", "DELETE": "delete"}[r.Method]
 			if resource != "" && action != "" {
 				username, password, _ := r.BasicAuth()
-				if err := s.store.Authorize(resource, r.PathValue("id"), action, username, password); err != nil {
+				if err := s.Store.Authorize(resource, r.PathValue("id"), action, username, password); err != nil {
 					http.Error(w, err.Error(), http.StatusUnauthorized)
 					return
 				}
@@ -524,29 +549,30 @@ func NewServer(dataDir, tmplDir, staticDir string) (*Server, error) {
 			next(w, r)
 		})
 	}
-	s.mux.Handle("GET /api/{resource}/", auth(s.handleList))
-	s.mux.Handle("POST /api/{resource}/", auth(s.handleCreate))
-	s.mux.Handle("GET /api/{resource}/{id}", auth(s.handleGet))
-	s.mux.Handle("PUT /api/{resource}/{id}", auth(s.handleUpdate))
-	s.mux.Handle("DELETE /api/{resource}/{id}", auth(s.handleDelete))
+	s.Mux.Handle("GET /api/{resource}/", auth(s.handleList))
+	s.Mux.Handle("POST /api/{resource}/", auth(s.handleCreate))
+	s.Mux.Handle("GET /api/{resource}/{id}", auth(s.handleGet))
+	s.Mux.Handle("PUT /api/{resource}/{id}", auth(s.handleUpdate))
+	s.Mux.Handle("DELETE /api/{resource}/{id}", auth(s.handleDelete))
+	s.Mux.HandleFunc("GET /api/events/{resource}", s.handleEvents)
 	if tmplDir != "" {
 		if tmpl, err := template.ParseGlob(filepath.Join(tmplDir, "*")); err == nil {
 			for _, t := range tmpl.Templates() {
-				s.mux.Handle(fmt.Sprintf("GET /%s", t.Name()), s.handleTemplate(tmpl, t.Name()))
+				s.Mux.Handle(fmt.Sprintf("GET /%s", t.Name()), s.handleTemplate(tmpl, t.Name()))
 			}
 		}
 	}
 	if staticDir != "" {
-		s.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
+		s.Mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
 	}
 
 	return s, nil
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.Mux.ServeHTTP(w, r) }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
-	res, err := s.store.List(r.PathValue("resource"), "")
+	res, err := s.Store.List(r.PathValue("resource"), "")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -561,18 +587,19 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resource := r.PathValue("resource")
-	id, err := s.store.Create(resource, res)
+	id, err := s.Store.Create(resource, res)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.Broker.Publish(resource, Event{Action: "created", ID: res["_id"].(string), Data: res})
 	w.Header().Set("Location", fmt.Sprintf("/api/%s/%s", resource, id))
 	w.Header().Set("HX-Trigger", fmt.Sprintf("%s-changed", resource))
 	w.WriteHeader(http.StatusCreated)
 }
 
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
-	res, err := s.store.Get(r.PathValue("resource"), r.PathValue("id"))
+	res, err := s.Store.Get(r.PathValue("resource"), r.PathValue("id"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -592,16 +619,17 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	resource := r.PathValue("resource")
 	res["_id"] = r.PathValue("id")
-	if err := s.store.Update(resource, res); err != nil {
+	if err := s.Store.Update(resource, res); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.Broker.Publish(resource, Event{Action: "updated", ID: res["_id"].(string), Data: res})
 	w.Header().Set("HX-Trigger", fmt.Sprintf("%s-changed", resource))
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.Delete(r.PathValue("resource"), r.PathValue("id")); err != nil {
+	if err := s.Store.Delete(r.PathValue("resource"), r.PathValue("id")); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -609,7 +637,15 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTemplate(tmpl *template.Template, name string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		data := map[string]any{"Store": s.store, "Request": r, "_id": r.URL.Query().Get("_id")}
+		data := map[string]any{
+			"Store":   s.Store,
+			"Request": r,
+			"Can": func(action, resource, id string) bool {
+				username, password, _ := r.BasicAuth()
+				return s.Store.Authorize(resource, id, action, username, password) == nil
+			},
+			"_id": r.URL.Query().Get("_id"),
+		}
 		tmpl.ExecuteTemplate(w, name, data)
 	}
 }
@@ -623,19 +659,24 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	ch := make(chan string)
+	resource := r.PathValue("resource")
 	username, password, _ := r.BasicAuth()
-	if _, err := s.store.Authenticate(username, password); err != nil {
+
+	if _, err := s.Store.Authenticate(username, password); err != nil {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
-	s.broker.Subscribe(username, ch)
-	defer s.broker.Unsubscribe(username, ch)
+	events := make(chan Event, 10)
+	s.Broker.Subscribe(resource, events)
+	defer s.Broker.Unsubscribe(resource, events)
 	for {
 		select {
-		case resource := <-ch:
-			fmt.Fprintf(w, "event: update\ndata: %s\n\n", resource)
-			flusher.Flush()
+		case e := <-events:
+			if e.Action == "delete" || s.Store.Authorize(resource, e.ID, "read", username, password) == nil {
+				data, _ := json.Marshal(e.Data)
+				fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.Action, data)
+				flusher.Flush()
+			}
 		case <-r.Context().Done():
 			return
 		}

@@ -344,7 +344,6 @@ func (s *Store) Create(resource string, r Resource) (string, error) {
 	r["_id"] = newID
 	r["_v"] = 1.0
 	rec, err := s.Schemas[resource].Record(r)
-	fmt.Println("Creating record:", r, rec, err)
 	if err != nil {
 		return "", err
 	}

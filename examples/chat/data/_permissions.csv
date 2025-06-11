@@ -1,0 +1,4 @@
+p1,1,messages,create,,*,"Access with authentication only",
+p2,1,messages,read,,*,"Access with authentication only",
+p3,1,messages,update,author,admin,"Access with authentication only",
+p4,1,messages,delete,author,admin,"Access with authentication only",

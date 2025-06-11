@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <script src="https://unpkg.com/htmx.org@latest"></script>
+    <script src="https://unpkg.com/htmx.org/dist/ext/json-enc.js"></script>
+    <script src="https://unpkg.com/htmx.org/dist/ext/sse.js"></script>
+</head>
+
+<body>
+    {{if not .User}}
+
+    <form hx-post="/api/login">
+        <input name="username" placeholder="Username" required>
+        <input name="password" type="password" placeholder="Password" required>
+        <button type="submit">Login</button>
+    </form>
+
+    {{else}}
+
+    <div id="messages-container" hx-ext="sse" sse-connect="/api/events/messages">
+        <div hx-get="/messages" hx-trigger="load,sse:created" hx-swap="innerHTML"></div>
+    </div>
+
+    <form hx-post="/api/messages/" hx-swap="none" hx-ext="json-enc" _="on htmx:afterRequest reset() me">
+        <input type="text" name="content" placeholder="Type your message here..." required>
+        <button type="submit">Send</button>
+    </form>
+    {{end}}
+    <script>
+        htmx.logAll();
+    </script>
+</body>
+
+</html>
+
+{{define "messages"}}
+{{range .Store.List "messages" "created_at"}}
+<div class="message">
+    <strong>{{.author}}:</strong> <span>{{.content}}</span>
+    {{ if call $.Authorize "messages" ._id "delete" }}
+    <button class="delete" hx-delete="/api/messages/{{._id}}" hx-target="closest .message"
+        hx-swap="outerHTML">×</button>
+    {{ end }}
+</div>
+{{end}}
+{{end}}

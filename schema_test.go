@@ -1,4 +1,4 @@
-package main
+package pennybase
 
 import (
 	"fmt"
@@ -332,7 +332,7 @@ func TestSchema_EdgeCases(t *testing.T) {
 
 	t.Run("special characters in text", func(t *testing.T) {
 		schema := Schema{{Field: "text", Type: Text}}
-		resource := Resource{"text": "特殊字符 日本語" }
+		resource := Resource{"text": "特殊字符 日本語"}
 
 		rec, err := schema.Record(resource)
 		if err != nil {

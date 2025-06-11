@@ -1,6 +1,7 @@
-package main
+package pennybase
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
@@ -20,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Record []string
@@ -59,6 +61,7 @@ var HashPasswd = func(passwd, salt string) string {
 	sum := sha256.Sum256([]byte(salt + passwd))
 	return base32.StdEncoding.EncodeToString(sum[:])
 }
+var SessionKey = Salt()
 
 func (field FieldSchema) Validate(v any) bool {
 	if v == nil {
@@ -265,19 +268,42 @@ func (db *csvDB) Iter() func(yield func(Record, error) bool) {
 	}
 }
 
-type Hook func(trigger, resource, id, user string, r Resource) error
+func SignSession(username string) string {
+	data := fmt.Sprintf("%s:%d", username, time.Now().Unix())
+	sum := sha256.Sum256([]byte(SessionKey + data))
+	sig := base32.StdEncoding.EncodeToString(sum[:])[:16]
+	return fmt.Sprintf("%s.%s", data, sig)
+}
 
-func nopHook(trigger, resource, id, user string, r Resource) error { return nil }
+func VerifySession(session string) (string, bool) {
+	parts := strings.Split(session, ".")
+	if len(parts) != 2 {
+		return "", false
+	}
+	data, sig := parts[0], parts[1]
+	sum := sha256.Sum256([]byte(SessionKey + data))
+	expectedSig := base32.StdEncoding.EncodeToString(sum[:])[:16]
+	if sig != expectedSig {
+		return "", false
+	}
+	if parts = strings.Split(data, ":"); len(parts) == 2 {
+		if ts, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+			if time.Now().Unix()-ts < 86400 { // 24 hours
+				return parts[0], true
+			}
+		}
+	}
+	return "", false
+}
 
 type Store struct {
 	Dir       string
 	Schemas   map[string]Schema
 	Resources map[string]DB
-	Hook      Hook
 }
 
 func NewStore(dir string) (*Store, error) {
-	s := &Store{Dir: dir, Schemas: map[string]Schema{}, Resources: map[string]DB{}, Hook: nopHook}
+	s := &Store{Dir: dir, Schemas: map[string]Schema{}, Resources: map[string]DB{}}
 	schemaDB, err := NewCSVDB(s.Dir + "/_schemas.csv")
 	if err != nil {
 		return nil, err
@@ -317,10 +343,8 @@ func (s *Store) Create(resource string, r Resource) (string, error) {
 	newID := ID()
 	r["_id"] = newID
 	r["_v"] = 1.0
-	if err := s.Hook("create", resource, newID, "", r); err != nil {
-		return "", err
-	}
 	rec, err := s.Schemas[resource].Record(r)
+	fmt.Println("Creating record:", r, rec, err)
 	if err != nil {
 		return "", err
 	}
@@ -345,9 +369,6 @@ func (s *Store) Update(resource string, r Resource) error {
 		}
 	}
 	r["_v"] = orig["_v"].(float64) + 1
-	if err := s.Hook("update", resource, r["_id"].(string), "", r); err != nil {
-		return err
-	}
 	rec, err := s.Schemas[resource].Record(r)
 	if err != nil {
 		return err
@@ -359,9 +380,6 @@ func (s *Store) Delete(resource, id string) error {
 	db, ok := s.Resources[resource]
 	if !ok {
 		return fmt.Errorf("resource %s not found", resource)
-	}
-	if err := s.Hook("delete", resource, id, "", nil); err != nil {
-		return err
 	}
 	return db.Delete(id)
 }
@@ -430,25 +448,38 @@ func (s *Store) Close() error {
 	return nil
 }
 
-func (s *Store) Authenticate(username, password string) (Resource, error) {
-	users, err := s.List("_users", "")
-	if err != nil {
-		return nil, fmt.Errorf("users error: %w", err)
-	}
-	for _, u := range users {
-		if u["_id"] == username && u["password"] == HashPasswd(password, u["salt"].(string)) {
+func (s *Store) Authenticate(r *http.Request) (Resource, error) {
+	if cookie, err := r.Cookie("session"); err == nil {
+		if username, ok := VerifySession(cookie.Value); ok {
+			u, err := s.Get("_users", username)
+			if err != nil {
+				return nil, fmt.Errorf("users error: %w", err)
+			}
 			return u, nil
 		}
+	}
+	if username, password, ok := r.BasicAuth(); ok {
+		return s.AuthenticateBasic(username, password)
 	}
 	return nil, errors.New("unauthenticated")
 }
 
-func (s *Store) Authorize(resource, id, action, username, password string) error {
+func (s *Store) AuthenticateBasic(username, password string) (Resource, error) {
+	u, err := s.Get("_users", username)
+	if err != nil {
+		return nil, fmt.Errorf("users error: %w", err)
+	}
+	if u["password"] != HashPasswd(password, u["salt"].(string)) {
+		return nil, errors.New("unauthenticated")
+	}
+	return u, nil
+}
+
+func (s *Store) Authorize(resource, id, action string, user Resource) error {
 	permissions, err := s.List("_permissions", "")
 	if err != nil {
 		return fmt.Errorf("permissions error: %w", err)
 	}
-	var u Resource
 	for _, p := range permissions {
 		if p["resource"] != resource || (p["action"] != "*" && p["action"] != action) {
 			continue
@@ -456,15 +487,11 @@ func (s *Store) Authorize(resource, id, action, username, password string) error
 		if p["field"] == "" && p["role"] == "" { // public
 			return nil
 		}
-		// Non-public, requires authentication
-		if u == nil {
-			u, err = s.Authenticate(username, password)
-			if err != nil {
-				return err
-			}
+		if user == nil {
+			return errors.New("unauthenticated")
 		}
 		// Any role? Or user has the role?
-		if p["role"] == "*" || slices.Contains(u["roles"].([]string), p["role"].(string)) {
+		if p["role"] == "*" || slices.Contains(user["roles"].([]string), p["role"].(string)) {
 			return nil
 		}
 		if id != "" {
@@ -472,6 +499,7 @@ func (s *Store) Authorize(resource, id, action, username, password string) error
 			if err != nil {
 				return err
 			}
+			username := user["_id"].(string)
 			if user, ok := res[p["field"].(string)]; ok && user == username {
 				return nil // user name matches requested resource field (string)
 			} else if users, ok := res[p["field"].(string)].([]string); ok && slices.Contains(users, username) {
@@ -523,10 +551,15 @@ func (b *Broker) Publish(resource string, evt Event) {
 	}
 }
 
+type Hook func(trigger, resource string, user, r Resource) error
+
+func nopHook(trigger, resource string, user, r Resource) error { return nil }
+
 type Server struct {
 	Store  *Store
 	Broker *Broker
 	Mux    *http.ServeMux
+	Hook   Hook
 }
 
 func NewServer(dataDir, tmplDir, staticDir string) (*Server, error) {
@@ -534,19 +567,19 @@ func NewServer(dataDir, tmplDir, staticDir string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{Store: store, Broker: &Broker{channels: map[string]map[chan Event]bool{}}, Mux: http.NewServeMux()}
+	s := &Server{Store: store, Broker: &Broker{channels: map[string]map[chan Event]bool{}}, Mux: http.NewServeMux(), Hook: nopHook}
 	auth := func(next http.HandlerFunc) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			resource := r.PathValue("resource")
 			action := map[string]string{"GET": "read", "POST": "create", "PUT": "update", "DELETE": "delete"}[r.Method]
+			user, _ := s.Store.Authenticate(r)
 			if resource != "" && action != "" {
-				username, password, _ := r.BasicAuth()
-				if err := s.Store.Authorize(resource, r.PathValue("id"), action, username, password); err != nil {
+				if err := s.Store.Authorize(resource, r.PathValue("id"), action, user); err != nil {
 					http.Error(w, err.Error(), http.StatusUnauthorized)
 					return
 				}
 			}
-			next(w, r)
+			next(w, r.WithContext(context.WithValue(r.Context(), "user", user)))
 		})
 	}
 	s.Mux.Handle("GET /api/{resource}/", auth(s.handleList))
@@ -555,9 +588,14 @@ func NewServer(dataDir, tmplDir, staticDir string) (*Server, error) {
 	s.Mux.Handle("PUT /api/{resource}/{id}", auth(s.handleUpdate))
 	s.Mux.Handle("DELETE /api/{resource}/{id}", auth(s.handleDelete))
 	s.Mux.HandleFunc("GET /api/events/{resource}", s.handleEvents)
+	s.Mux.HandleFunc("POST /api/login", s.handleLogin)
+	s.Mux.HandleFunc("POST /api/logout", s.handleLogout)
 	if tmplDir != "" {
 		if tmpl, err := template.ParseGlob(filepath.Join(tmplDir, "*")); err == nil {
 			for _, t := range tmpl.Templates() {
+				if t.Name() == "index.html" {
+					s.Mux.Handle("GET /", s.handleTemplate(t, "index.html"))
+				}
 				s.Mux.Handle(fmt.Sprintf("GET /%s", t.Name()), s.handleTemplate(tmpl, t.Name()))
 			}
 		}
@@ -587,6 +625,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resource := r.PathValue("resource")
+	if err := s.Hook("create", resource, r.Context().Value("user").(Resource), res); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	id, err := s.Store.Create(resource, res)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -619,6 +661,10 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	resource := r.PathValue("resource")
 	res["_id"] = r.PathValue("id")
+	if err := s.Hook("update", resource, r.Context().Value("user").(Resource), res); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if err := s.Store.Update(resource, res); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -629,24 +675,57 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	res, _ := s.Store.Get(r.PathValue("resource"), r.PathValue("id"))
+	if err := s.Hook("delete", r.PathValue("resource"), r.Context().Value("user").(Resource), res); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if err := s.Store.Delete(r.PathValue("resource"), r.PathValue("id")); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.Broker.Publish(r.PathValue("resource"), Event{Action: "deleted", ID: r.PathValue("id")})
+	w.Header().Set("HX-Trigger", fmt.Sprintf("%s-changed", r.PathValue("resource")))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	username, password := r.FormValue("username"), r.FormValue("password")
+	if _, err := s.Store.AuthenticateBasic(username, password); err != nil {
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session",
+		Value:    SignSession(username),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   86400, // 24 hours
+	})
+	w.Header().Set("HX-Redirect", "/")
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{Name: "session", Value: "", Path: "/", HttpOnly: true, MaxAge: -1})
+	w.Header().Set("HX-Redirect", "/")
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) handleTemplate(tmpl *template.Template, name string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		user, _ := s.Store.Authenticate(r)
 		data := map[string]any{
 			"Store":   s.Store,
 			"Request": r,
-			"Can": func(action, resource, id string) bool {
-				username, password, _ := r.BasicAuth()
-				return s.Store.Authorize(resource, id, action, username, password) == nil
+			"User":    user,
+			"ID":      r.URL.Query().Get("_id"),
+			"Authorize": func(resource, id, action string) bool {
+				return s.Store.Authorize(resource, id, action, user) == nil
 			},
-			"_id": r.URL.Query().Get("_id"),
 		}
-		tmpl.ExecuteTemplate(w, name, data)
+		_ = tmpl.ExecuteTemplate(w, name, data)
 	}
 }
 
@@ -660,9 +739,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	resource := r.PathValue("resource")
-	username, password, _ := r.BasicAuth()
-
-	if _, err := s.Store.Authenticate(username, password); err != nil {
+	user, err := s.Store.Authenticate(r)
+	if err != nil {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
@@ -672,7 +750,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case e := <-events:
-			if e.Action == "delete" || s.Store.Authorize(resource, e.ID, "read", username, password) == nil {
+			if e.Action == "delete" || s.Store.Authorize(resource, e.ID, "read", user) == nil {
 				data, _ := json.Marshal(e.Data)
 				fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.Action, data)
 				flusher.Flush()
@@ -682,5 +760,3 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
-
-func main() {}

@@ -1,4 +1,4 @@
-package main
+package pennybase
 
 import (
 	"errors"
@@ -97,7 +97,8 @@ func TestAuthorization(t *testing.T) {
 			// 	})
 			// }
 			//
-			err = store.Authorize(tt.resource, tt.id, tt.action, tt.username, tt.password)
+			u, _ := store.AuthenticateBasic(tt.username, tt.password)
+			err = store.Authorize(tt.resource, tt.id, tt.action, u)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Authorize() error = %v, wantErr %v", err, tt.wantErr)

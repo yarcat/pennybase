@@ -1,0 +1,5 @@
+{{define "books.html"}}
+{{range .Store.List "books" ""}}
+<div class="book">{{.title}} ({{.year}})</div>
+{{end}}
+{{end}}

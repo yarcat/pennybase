@@ -598,6 +598,8 @@ func NewServer(dataDir, tmplDir, staticDir string) (*Server, error) {
 				}
 				s.Mux.Handle(fmt.Sprintf("GET /%s", t.Name()), s.handleTemplate(tmpl, t.Name()))
 			}
+		} else {
+			log.Fatal("Error parsing templates:", err)
 		}
 	}
 	if staticDir != "" {
@@ -671,7 +673,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Broker.Publish(resource, Event{Action: "updated", ID: res["_id"].(string), Data: res})
 	w.Header().Set("HX-Trigger", fmt.Sprintf("%s-changed", resource))
-	w.WriteHeader(http.StatusNoContent)
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
@@ -686,7 +688,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Broker.Publish(r.PathValue("resource"), Event{Action: "deleted", Data: res})
 	w.Header().Set("HX-Trigger", fmt.Sprintf("%s-changed", r.PathValue("resource")))
-	w.WriteHeader(http.StatusNoContent)
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -725,7 +727,9 @@ func (s *Server) handleTemplate(tmpl *template.Template, name string) http.Handl
 				return s.Store.Authorize(resource, id, action, user) == nil
 			},
 		}
-		_ = tmpl.ExecuteTemplate(w, name, data)
+		if err := tmpl.ExecuteTemplate(w, name, data); err != nil {
+			log.Println("Error executing template:", name, err)
+		}
 	}
 }
 

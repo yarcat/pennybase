@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <script src="https://unpkg.com/htmx.org@latest"></script>
+  <script src="https://unpkg.com/htmx.org/dist/ext/json-enc.js"></script>
+</head>
+
+<body>
+  <div hx-get="/todo-list" hx-trigger="load" hx-target="this">
+  </div>
+</body>
+
+</html>
+
+{{define "todo-list"}}
+<div id="todo-list" hx-get="/todo-list" hx-trigger="todo-changed from:body">
+  {{range .Store.List "todo" "_id"}}
+  {{template "todo-item" .}}
+  {{end}}
+</div>
+<form hx-post="/api/todo/" hx-swap="none" hx-ext="json-enc" _="on htmx:afterRequest reset() me">
+  <input type="text" name="description" required>
+  <button>Add</button>
+</form>
+{{end}}
+
+{{define "todo-item"}}
+<div class="todo" id="todo-{{._id}}">
+  <span class="{{if .completed}}completed{{end}}">{{.description}}</span>
+  <button hx-put="/api/todo/{{._id}}" hx-ext="json-enc" hx-vals='{"completed":{{if .completed}}0{{else}}1{{end}}}'
+    _="on click toggle .completed on previous span">
+    {{if .completed}}Undo{{else}}Complete{{end}}
+  </button>
+  <button hx-delete="/api/todo/{{._id}}" hx-target="closest .todo" hx-swap="outerHTML">
+    Delete
+  </button>
+</div>
+{{end}}

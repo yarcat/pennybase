@@ -610,7 +610,7 @@ func NewServer(dataDir, tmplDir, staticDir string) (*Server, error) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.Mux.ServeHTTP(w, r) }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
-	res, err := s.Store.List(r.PathValue("resource"), "")
+	res, err := s.Store.List(r.PathValue("resource"), r.FormValue("sort_by"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -684,7 +684,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.Broker.Publish(r.PathValue("resource"), Event{Action: "deleted", ID: r.PathValue("id")})
+	s.Broker.Publish(r.PathValue("resource"), Event{Action: "deleted", Data: res})
 	w.Header().Set("HX-Trigger", fmt.Sprintf("%s-changed", r.PathValue("resource")))
 	w.WriteHeader(http.StatusNoContent)
 }

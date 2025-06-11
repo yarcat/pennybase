@@ -169,31 +169,30 @@ func TestServerREST(t *testing.T) {
 	}
 }
 
-//
-// func TestServerTemplate(t *testing.T) {
-// 	dir := testData(t, "testdata/rest")
-// 	s, _ := NewServer(dir, filepath.Join(dir, "templates"), "")
-// 	req := httptest.NewRequest("GET", "/books.html", nil)
-// 	w := httptest.NewRecorder()
-// 	s.mux.ServeHTTP(w, req)
-// 	if w.Code != http.StatusOK {
-// 		t.Errorf("Expected status OK: %v", w.Code)
-// 	}
-// 	if !strings.Contains(w.Body.String(), "<div class=\"book\">The Go Programming Language (2015)</div>") {
-// 		t.Errorf("Template rendering failed: %v", w.Body.String())
-// 	}
-// 	if !strings.Contains(w.Body.String(), "<div class=\"book\">1984 (1949)</div>") {
-// 		t.Errorf("Template rendering failed: %v", w.Body.String())
-// 	}
-// }
-//
-// func TestServerStaticFiles(t *testing.T) {
-// 	dir := testData(t, "testdata/rest")
-// 	s, _ := NewServer(dir, "", filepath.Join(dir, "static"))
-// 	req := httptest.NewRequest("GET", "/static/test.txt", nil)
-// 	w := httptest.NewRecorder()
-// 	s.mux.ServeHTTP(w, req)
-// 	if w.Body.String() != "Static text file\n" {
-// 		t.Errorf("Static file serving failed: %v", w.Body.String())
-// 	}
-// }
+func TestServerTemplate(t *testing.T) {
+	dir := testData(t, "testdata/rest")
+	s, _ := NewServer(dir, filepath.Join(dir, "templates"), "")
+	req := httptest.NewRequest("GET", "/books.html", nil)
+	w := httptest.NewRecorder()
+	s.Mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status OK: %v", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "<div class=\"book\">The Go Programming Language (2015)</div>") {
+		t.Errorf("Template rendering failed: %v", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "<div class=\"book\">1984 (1949)</div>") {
+		t.Errorf("Template rendering failed: %v", w.Body.String())
+	}
+}
+
+func TestServerStaticFiles(t *testing.T) {
+	dir := testData(t, "testdata/rest")
+	s, _ := NewServer(dir, "", filepath.Join(dir, "static"))
+	req := httptest.NewRequest("GET", "/static/test.txt", nil)
+	w := httptest.NewRecorder()
+	s.Mux.ServeHTTP(w, req)
+	if w.Body.String() != "Static text file\n" {
+		t.Errorf("Static file serving failed: %v", w.Body.String())
+	}
+}

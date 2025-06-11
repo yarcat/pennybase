@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<script src="https://unpkg.com/htmx.org@latest"></script>
+	<script src="https://unpkg.com/htmx.org/dist/ext/json-enc.js"></script>
+</head>
+
+<body>
+	{{if not .User}}
+	<form hx-post="/api/login">
+		<input name="username" placeholder="Username" required>
+		<input name="password" type="password" placeholder="Password" required>
+		<button type="submit">Login</button>
+	</form>
+	{{else}}
+	<p>Welcome, {{.User._id}}!</p>
+	<button hx-post="/api/logout">Logout</button>
+	{{end}}
+</body>
+
+</html>

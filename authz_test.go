@@ -2,6 +2,7 @@ package pennybase
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 )
 
@@ -80,11 +81,8 @@ func TestAuthorization(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dir := testData(t, "testdata/authz")
-			store, err := NewStore(dir)
-			if err != nil {
-				t.Fatalf("NewStore: %v", err)
-			}
+			dir := testData(t, filepath.Join("testdata", "authz"))
+			store := must(NewStore(dir)).T(t)
 			defer store.Close()
 
 			// Setup test resource if needed
@@ -98,7 +96,7 @@ func TestAuthorization(t *testing.T) {
 			// }
 			//
 			u, _ := store.AuthenticateBasic(tt.username, tt.password)
-			err = store.Authorize(tt.resource, tt.id, tt.action, u)
+			err := store.Authorize(tt.resource, tt.id, tt.action, u)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Authorize() error = %v, wantErr %v", err, tt.wantErr)

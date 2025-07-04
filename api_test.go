@@ -6,21 +6,19 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestServerREST(t *testing.T) {
-	testDir := testData(t, "testdata/rest")
-	s, err := NewServer(
+	testDir := testData(t, filepath.Join("testdata", "rest"))
+	s := must(NewServer(
 		testDir,
 		filepath.Join(testDir, "templates"),
 		filepath.Join(testDir, "static"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	)).T(t)
 	defer s.Store.Close()
 
 	ts := httptest.NewServer(s)
@@ -38,12 +36,12 @@ func TestServerREST(t *testing.T) {
 		// Public endpoints
 		{
 			name:   "List books unauthorized",
-			method: "GET",
+			method: http.MethodGet,
 			path:   "/api/books/",
 			status: http.StatusOK,
 			validate: func(t *testing.T, resp *http.Response) {
 				var books []Resource
-				json.NewDecoder(resp.Body).Decode(&books)
+				must0(t, json.NewDecoder(resp.Body).Decode(&books))
 				if len(books) != 2 {
 					t.Errorf("Expected 2 books, got %d", len(books))
 				}
@@ -51,13 +49,13 @@ func TestServerREST(t *testing.T) {
 		},
 		{
 			name:   "Get static file",
-			method: "GET",
+			method: http.MethodGet,
 			path:   "/static/test.txt",
 			status: http.StatusOK,
 			validate: func(t *testing.T, resp *http.Response) {
-				body, _ := io.ReadAll(resp.Body)
-				if string(body) != "Static text file\n" {
-					t.Errorf("Static file content mismatch: %s", string(body))
+				body := must(io.ReadAll(resp.Body)).T(t)
+				if !bytes.Equal(body, []byte("Static text file\n")) {
+					t.Errorf("Static file content mismatch: %s", body)
 				}
 			},
 		},
@@ -65,7 +63,7 @@ func TestServerREST(t *testing.T) {
 		// Template rendering
 		{
 			name:   "Render books template",
-			method: "GET",
+			method: http.MethodGet,
 			path:   "/books.html",
 			status: http.StatusOK,
 			validate: func(t *testing.T, resp *http.Response) {
@@ -81,14 +79,14 @@ func TestServerREST(t *testing.T) {
 		// Authentication tests
 		{
 			name:   "Create book unauthenticated",
-			method: "POST",
+			method: http.MethodPost,
 			path:   "/api/books/",
 			body:   Resource{"title": "New Book"},
 			status: http.StatusUnauthorized,
 		},
 		{
 			name:   "Create book invalid credentials",
-			method: "POST",
+			method: http.MethodPost,
 			path:   "/api/books/",
 			body:   Resource{"title": "New Book"},
 			auth:   [2]string{"user1", "wrongpass"},
@@ -98,7 +96,7 @@ func TestServerREST(t *testing.T) {
 		// Authorized operations
 		{
 			name:   "Create book valid user",
-			method: "POST",
+			method: http.MethodPost,
 			path:   "/api/books/",
 			body:   Resource{"title": "Valid Book", "author": "Unknown Author", "year": 2023},
 			auth:   [2]string{"user1", "user1pass"},
@@ -112,7 +110,7 @@ func TestServerREST(t *testing.T) {
 		},
 		{
 			name:   "Update book unauthorized",
-			method: "PUT",
+			method: http.MethodPut,
 			path:   "/api/books/book1",
 			body:   Resource{"title": "Updated Title"},
 			auth:   [2]string{"user1", "user1pass"},
@@ -122,7 +120,7 @@ func TestServerREST(t *testing.T) {
 		// Admin operations
 		{
 			name:   "Delete book as admin",
-			method: "DELETE",
+			method: http.MethodDelete,
 			path:   "/api/books/book2",
 			auth:   [2]string{"admin", "admin123"},
 			status: http.StatusOK,
@@ -131,7 +129,7 @@ func TestServerREST(t *testing.T) {
 		// Validation tests
 		{
 			name:   "Create invalid book",
-			method: "POST",
+			method: http.MethodPost,
 			path:   "/api/books/",
 			body:   Resource{"title": "Book 123", "year": 3000},
 			auth:   [2]string{"user1", "user1pass"},
@@ -143,19 +141,17 @@ func TestServerREST(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var body io.Reader
 			if tc.body != nil {
-				b, _ := json.Marshal(tc.body)
+				b := must(json.Marshal(tc.body)).T(t)
 				body = bytes.NewReader(b)
 			}
 
-			req, _ := http.NewRequest(tc.method, ts.URL+tc.path, body)
+			u := must(url.JoinPath(ts.URL, tc.path)).T(t)
+			req := must(http.NewRequest(tc.method, u, body)).T(t)
 			if tc.auth[0] != "" {
 				req.SetBasicAuth(tc.auth[0], tc.auth[1])
 			}
 
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatal(err)
-			}
+			resp := must(http.DefaultClient.Do(req)).T(t)
 			defer resp.Body.Close()
 
 			if resp.StatusCode != tc.status {
@@ -170,29 +166,30 @@ func TestServerREST(t *testing.T) {
 }
 
 func TestServerTemplate(t *testing.T) {
-	dir := testData(t, "testdata/rest")
-	s, _ := NewServer(dir, filepath.Join(dir, "templates"), "")
-	req := httptest.NewRequest("GET", "/books.html", nil)
+	dir := testData(t, filepath.Join("testdata", "rest"))
+	s := must(NewServer(dir, filepath.Join(dir, "templates"), "" /*staticDir*/)).T(t)
+	req := httptest.NewRequest(http.MethodGet, "/books.html", nil)
 	w := httptest.NewRecorder()
 	s.Mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
-		t.Errorf("Expected status OK: %v", w.Code)
+		t.Errorf("Expected status 200 OK, got %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "<div class=\"book\">The Go Programming Language (2015)</div>") {
-		t.Errorf("Template rendering failed: %v", w.Body.String())
+	gotBody := w.Body.String()
+	if !strings.Contains(gotBody, "<div class=\"book\">The Go Programming Language (2015)</div>") {
+		t.Errorf("Got unexpected body: %v", gotBody)
 	}
-	if !strings.Contains(w.Body.String(), "<div class=\"book\">1984 (1949)</div>") {
-		t.Errorf("Template rendering failed: %v", w.Body.String())
+	if !strings.Contains(gotBody, "<div class=\"book\">1984 (1949)</div>") {
+		t.Errorf("Got unexpected body: %v", gotBody)
 	}
 }
 
 func TestServerStaticFiles(t *testing.T) {
-	dir := testData(t, "testdata/rest")
-	s, _ := NewServer(dir, "", filepath.Join(dir, "static"))
-	req := httptest.NewRequest("GET", "/static/test.txt", nil)
+	dir := testData(t, filepath.Join("testdata", "rest"))
+	s := must(NewServer(dir, "" /*tmplDir*/, filepath.Join(dir, "static"))).T(t)
+	req := httptest.NewRequest(http.MethodGet, "/static/test.txt", nil)
 	w := httptest.NewRecorder()
 	s.Mux.ServeHTTP(w, req)
-	if w.Body.String() != "Static text file\n" {
-		t.Errorf("Static file serving failed: %v", w.Body.String())
+	if gotBody := w.Body.String(); gotBody != "Static text file\n" {
+		t.Errorf("Static file serving failed: %v", gotBody)
 	}
 }

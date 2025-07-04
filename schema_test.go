@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -185,21 +186,10 @@ func TestSchemaRecordConversion(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec, err := testSchema.Record(tt.resource)
-			if tt.expectErr {
-				if err == nil {
-					t.Errorf("expected error but got nil")
-				}
-				return
-			} else if err != nil {
-				t.Errorf("unexpected error: %v, resource: %v", err, tt.resource)
-			} else if len(rec) != len(tt.expectedRec) {
-				t.Errorf("expected record length %d, got %d", len(tt.expectedRec), len(rec))
-			} else {
-				for i, v := range rec {
-					if v != tt.expectedRec[i] {
-						t.Errorf("expected %v, got %v", tt.expectedRec[i], v)
-					}
-				}
+			if gotErr := (err != nil); gotErr != tt.expectErr {
+				t.Errorf("expected error %v, got %v", tt.expectErr, err)
+			} else if !slices.Equal(rec, tt.expectedRec) {
+				t.Errorf("expected %v, got %v", tt.expectedRec, rec)
 			}
 		})
 	}
@@ -301,19 +291,13 @@ func TestSchema_EdgeCases(t *testing.T) {
 		schema := Schema{}
 		resource := Resource{}
 
-		rec, err := schema.Record(resource)
-		if err != nil {
-			t.Fatal(err)
-		}
+		rec := must(schema.Record(resource)).T(t)
 		if len(rec) != 0 {
-			t.Fatal(rec)
+			t.Fatal("expected empty record for empty schema and resource, got:", rec)
 		}
-		res, err := schema.Resource(rec)
-		if err != nil {
-			t.Fatal(err)
-		}
+		res := must(schema.Resource(rec)).T(t)
 		if len(res) != 0 {
-			t.Fatal(res)
+			t.Fatal("expected empty resource for empty record, got:", res)
 		}
 	})
 
@@ -321,12 +305,10 @@ func TestSchema_EdgeCases(t *testing.T) {
 		schema := Schema{{Field: "big", Type: Number}}
 		resource := Resource{"big": math.MaxFloat64}
 
-		rec, err := schema.Record(resource)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(rec) != 1 || rec[0] != fmt.Sprintf("%g", math.MaxFloat64) {
-			t.Fatal(rec)
+		rec := must(schema.Record(resource)).T(t)
+		want := Record{fmt.Sprintf("%g", math.MaxFloat64)}
+		if !slices.Equal(rec, want) {
+			t.Fatalf("expected %v, got %v", want, rec)
 		}
 	})
 
@@ -334,12 +316,10 @@ func TestSchema_EdgeCases(t *testing.T) {
 		schema := Schema{{Field: "text", Type: Text}}
 		resource := Resource{"text": "特殊字符 日本語"}
 
-		rec, err := schema.Record(resource)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(rec) != 1 || rec[0] != "特殊字符 日本語" {
-			t.Fatal(rec)
+		rec := must(schema.Record(resource)).T(t)
+		want := Record{"特殊字符 日本語"}
+		if !slices.Equal(rec, want) {
+			t.Fatalf("expected %v, got %v", want, rec)
 		}
 	})
 }

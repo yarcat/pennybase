@@ -2,35 +2,8 @@ package pennybase
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 )
-
-func testData(t *testing.T, src string) string {
-	t.Helper()
-	dst := t.TempDir()
-	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(src, path)
-		target := filepath.Join(dst, rel)
-		if info.IsDir() {
-			return os.MkdirAll(target, 0755)
-		}
-
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(target, data, 0644)
-	})
-	if err != nil {
-		t.Fatalf("Failed to copy testdata: %v", err)
-	}
-	return dst
-}
 
 func TestStoreCRUD(t *testing.T) {
 	originalID := ID
